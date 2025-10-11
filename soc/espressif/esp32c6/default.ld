@@ -813,6 +813,7 @@ SECTIONS
     _instruction_reserved_end = ABSOLUTE(.);
     __text_region_end = ABSOLUTE(.);
     __rom_region_end = ABSOLUTE(.);
+    __rom_region_size = __rom_region_end - __rom_region_start;
     _etext = .;
 
   } GROUP_DATA_LINK_IN(FLASH_CODE_REGION, ROMABLE_REGION)
