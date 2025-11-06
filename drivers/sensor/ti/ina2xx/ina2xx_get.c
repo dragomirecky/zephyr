@@ -13,16 +13,17 @@ static int ina2xx_get_bus_voltage(const struct device *dev, struct sensor_value 
 {
 	const struct ina2xx_config *config = dev->config;
 	const struct ina2xx_channel *ch = config->channels->voltage;
+
+	if (ch == NULL) {
+		return -ENOTSUP;
+	}
+
 	const size_t bytes = (ch->reg->size + 7) / 8;
 	struct ina2xx_data *data = dev->data;
 	union {
 		uint32_t u32;
 		int32_t s32;
 	} value;
-
-	if (ch == NULL) {
-		return -ENOTSUP;
-	}
 
 	/* 16 or 20 bit, two's complement */
 	if (bytes == 2) {
@@ -44,16 +45,17 @@ static int ina2xx_get_shunt_voltage(const struct device *dev, struct sensor_valu
 {
 	const struct ina2xx_config *config = dev->config;
 	const struct ina2xx_channel *ch = config->channels->vshunt;
+
+	if (ch == NULL) {
+		return -ENOTSUP;
+	}
+
 	const size_t bytes = (ch->reg->size + 7) / 8;
 	struct ina2xx_data *data = dev->data;
 	union {
 		uint32_t u32;
 		int32_t s32;
 	} value;
-
-	if (ch == NULL) {
-		return -ENOTSUP;
-	}
 
 	/* 16 or 20 bit, two's complement */
 	if (bytes == 2) {
@@ -132,16 +134,17 @@ static int ina2xx_get_die_temp(const struct device *dev, struct sensor_value *va
 {
 	const struct ina2xx_config *config = dev->config;
 	const struct ina2xx_channel *ch = config->channels->die_temp;
+
+	if (ch == NULL) {
+		return -ENOTSUP;
+	}
+
 	const size_t bytes = (ch->reg->size + 7) / 8;
 	struct ina2xx_data *data = dev->data;
 	union {
 		uint64_t u64;
 		int64_t s64;
 	} value;
-
-	if (ch == NULL) {
-		return -ENOTSUP;
-	}
 
 	/* 12 or 16 bit, two's complement. */
 	if (bytes == 2) {
@@ -184,16 +187,17 @@ static int ina2xx_get_charge(const struct device *dev, struct sensor_value *val)
 {
 	const struct ina2xx_config *config = dev->config;
 	const struct ina2xx_channel *ch = config->channels->charge;
+
+	if (ch == NULL) {
+		return -ENOTSUP;
+	}
+
 	const size_t bytes = (ch->reg->size + 7) / 8;
 	struct ina2xx_data *data = dev->data;
 	union {
 		uint64_t u64;
 		int64_t s64;
 	} value;
-
-	if (ch == NULL) {
-		return -ENOTSUP;
-	}
 
 	/* 40 bit, two's complement. Multiplied by current lsb */
 	if (bytes == 5) {
