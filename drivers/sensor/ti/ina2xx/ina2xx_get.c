@@ -36,7 +36,7 @@ static int ina2xx_get_bus_voltage(const struct device *dev, struct sensor_value 
 		return -ENOTSUP;
 	}
 
-	value.s32 = (ch->mult * value.s32) / ch->div;
+	value.s32 = ((int32_t)ch->mult * value.s32) / (int32_t)ch->div;
 
 	return sensor_value_from_micro(val, value.s32);
 }
@@ -68,7 +68,7 @@ static int ina2xx_get_shunt_voltage(const struct device *dev, struct sensor_valu
 		return -ENOTSUP;
 	}
 
-	value.s32 = (ch->mult * value.s32) / ch->div;
+	value.s32 = ((int32_t)ch->mult * value.s32) / (int32_t)ch->div;
 
 	return sensor_value_from_micro(val, value.s32);
 }
@@ -99,7 +99,7 @@ static int ina2xx_get_current(const struct device *dev, struct sensor_value *val
 		return -ENOTSUP;
 	}
 
-	value.s32 = ((config->current_lsb * value.s32) / ch->div) * ch->mult;
+	value.s32 = (((int32_t)config->current_lsb * value.s32) / (int32_t)ch->div) * (int32_t)ch->mult;
 
 	return sensor_value_from_micro(val, value.s32);
 }
@@ -154,7 +154,7 @@ static int ina2xx_get_die_temp(const struct device *dev, struct sensor_value *va
 		return -ENOTSUP;
 	}
 
-	value.s64 = (ch->mult * value.s64) / ch->div;
+	value.s64 = ((int64_t)ch->mult * value.s64) / (int64_t)ch->div;
 
 	return sensor_value_from_micro(val, value.s64);
 }
@@ -207,7 +207,7 @@ static int ina2xx_get_charge(const struct device *dev, struct sensor_value *val)
 		return -ENOTSUP;
 	}
 
-	value.s64 = ((config->current_lsb * value.s64) / ch->div) * ch->mult;
+	value.s64 = (((int64_t)config->current_lsb * value.s64) / (int64_t)ch->div) * (int64_t)ch->mult;
 
 	return sensor_value_from_micro(val, value.s64);
 }
