@@ -42,6 +42,7 @@ config INA226
 	select INA2XX_HAS_CHANNEL_BUS_VOLTAGE
 	select INA2XX_HAS_CHANNEL_CURRENT
 	select INA2XX_HAS_CHANNEL_POWER
+	select INA2XX_HAS_CHANNEL_SHUNT_VOLTAGE
 	help
 	  Enable driver for INA226 Bidirectional Current/Power Monitor.
 
