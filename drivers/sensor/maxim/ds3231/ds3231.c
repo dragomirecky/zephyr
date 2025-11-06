@@ -126,8 +126,15 @@ void sensor_ds3231_submit_sync(struct rtio_iodev_sqe *iodev_sqe)
 
 	edata = (struct sensor_ds3231_edata *)buf;
 
-	if (channels[0].chan_type != SENSOR_CHAN_AMBIENT_TEMP) {
-		return;
+	bool has_ambient_temp = false;
+	for (int i = 0; i < cfg->count; i++) {
+		if (channels[i].chan_type == SENSOR_CHAN_AMBIENT_TEMP) {
+			has_ambient_temp = true;
+			break;
+		}
+	}
+	if (!has_ambient_temp) {
+		rtio_iodev_sqe_err(iodev_sqe, -ENOTSUP);
 	}
 
 	uint16_t raw_temp;
