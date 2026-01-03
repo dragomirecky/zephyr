@@ -1558,6 +1558,12 @@ static int mcp251xfd_init(const struct device *dev)
 		return -EINVAL;
 	}
 
+	ret = mcp251xfd_reset(dev);
+	if (ret < 0) {
+		LOG_ERR("Failed to reset the device [%d]", ret);
+		return ret;
+	}
+
 	gpio_init_callback(&dev_data->int_gpio_cb, mcp251xfd_int_gpio_callback,
 			   BIT(dev_cfg->int_gpio_dt.pin));
 
@@ -1575,12 +1581,6 @@ static int mcp251xfd_init(const struct device *dev)
 			K_PRIO_COOP(CONFIG_CAN_MCP251XFD_INT_THREAD_PRIO), 0, K_NO_WAIT);
 
 	(void)k_thread_name_set(&dev_data->int_thread, "MCP251XFD interrupt thread");
-
-	ret = mcp251xfd_reset(dev);
-	if (ret < 0) {
-		LOG_ERR("Failed to reset the device [%d]", ret);
-		return ret;
-	}
 
 	ret = can_calc_timing(dev, &timing, dev_cfg->common.bitrate,
 			      dev_cfg->common.sample_point);
