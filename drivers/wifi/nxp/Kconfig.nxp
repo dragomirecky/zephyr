@@ -37,6 +37,19 @@ config NXP_WIFI_AUTO_INIT
 	help
 	  Automatically initialize NXP Wi-Fi driver and FW.
 
+config NXP_WIFI_DEFERRED_INIT
+	bool "Defer NXP Wi-Fi initialization"
+	depends on NXP_WIFI_AUTO_INIT
+	help
+	  When enabled, the slow Wi-Fi subsystem initialization (OCOTP read,
+	  firmware load, power tables) is skipped at boot. The Wi-Fi interface
+	  starts with NET_IF_NO_AUTO_START flag set.
+
+	  Call net_if_up() on the Wi-Fi interface when you need WiFi
+	  functionality. This triggers the deferred initialization.
+
+	  This can save ~1.5 seconds of boot time on RW612-based boards.
+
 choice NXP_WIFI_PART
 	prompt "Select NXP Wi-Fi part"
 	depends on !NXP_WIFI_CUSTOM

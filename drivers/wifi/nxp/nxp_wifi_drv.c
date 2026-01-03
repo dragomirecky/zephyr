@@ -110,7 +110,7 @@ int nxp_wifi_wlan_event_callback(enum wlan_event_reason reason, void *data)
 	struct in_addr dhcps_addr4;
 	struct in_addr base_addr;
 	struct in_addr netmask_addr;
-	struct wifi_ap_sta_info ap_sta_info = { 0 };
+	struct wifi_ap_sta_info ap_sta_info = {0};
 #endif
 
 	LOG_DBG("WLAN: received event %d", reason);
@@ -325,7 +325,7 @@ int nxp_wifi_wlan_event_callback(enum wlan_event_reason reason, void *data)
 #endif
 
 		memcpy(ap_sta_info.mac, con_sta_info->mac_addr, WIFI_MAC_ADDR_LEN);
-		ap_sta_info.mac_length  = WIFI_MAC_ADDR_LEN;
+		ap_sta_info.mac_length = WIFI_MAC_ADDR_LEN;
 
 		wifi_mgmt_raise_ap_sta_connected_event(g_uap.netif, &ap_sta_info);
 		LOG_DBG("WLAN: UAP a Client Associated");
@@ -397,15 +397,14 @@ int nxp_wifi_wlan_event_callback(enum wlan_event_reason reason, void *data)
 static int nxp_wifi_cpu_reset(uint8_t enable)
 {
 	int err = 0;
-#if DT_NODE_HAS_PROP(DT_DRV_INST(0), sd_gpios) &&    \
-	DT_NODE_HAS_PROP(DT_DRV_INST(0), pwr_gpios)
+#if DT_NODE_HAS_PROP(DT_DRV_INST(0), sd_gpios) && DT_NODE_HAS_PROP(DT_DRV_INST(0), pwr_gpios)
 
 	struct gpio_dt_spec sdio_reset = GPIO_DT_SPEC_GET(DT_DRV_INST(0), sd_gpios);
 	struct gpio_dt_spec pwr_gpios = GPIO_DT_SPEC_GET(DT_DRV_INST(0), pwr_gpios);
 
 	if (!gpio_is_ready_dt(&sdio_reset)) {
 		LOG_ERR("Error: failed to configure sdio_reset %s pin %d", sdio_reset.port->name,
-				sdio_reset.pin);
+			sdio_reset.pin);
 		return -EIO;
 	}
 
@@ -413,13 +412,13 @@ static int nxp_wifi_cpu_reset(uint8_t enable)
 	err = gpio_pin_configure_dt(&sdio_reset, GPIO_OUTPUT);
 	if (err) {
 		LOG_ERR("Error %d: failed to configure sdio_reset %s pin %d", err,
-				sdio_reset.port->name, sdio_reset.pin);
+			sdio_reset.port->name, sdio_reset.pin);
 		return err;
 	}
 
 	if (!gpio_is_ready_dt(&pwr_gpios)) {
 		LOG_ERR("Error: failed to configure pwr_gpios %s pin %d", pwr_gpios.port->name,
-				pwr_gpios.pin);
+			pwr_gpios.pin);
 		return -EIO;
 	}
 
@@ -427,7 +426,7 @@ static int nxp_wifi_cpu_reset(uint8_t enable)
 	err = gpio_pin_configure_dt(&pwr_gpios, GPIO_OUTPUT);
 	if (err) {
 		LOG_ERR("Error %d: failed to configure pwr_gpios %s pin %d", err,
-				pwr_gpios.port->name, pwr_gpios.pin);
+			pwr_gpios.port->name, pwr_gpios.pin);
 		return err;
 	}
 
@@ -552,6 +551,49 @@ static int nxp_wifi_wlan_start(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
+/**
+ * @brief Ensure WiFi subsystem is started (for deferred init mode)
+ *
+ * When CONFIG_NXP_WIFI_DEFERRED_INIT is enabled, the slow WiFi initialization
+ * (OCOTP read, firmware load, power tables) is skipped at boot time. This
+ * function performs the deferred initialization when WiFi is first needed.
+ *
+ * This function is safe to call multiple times - it will only initialize once.
+ * Call this from your application when you need WiFi, or let it be called
+ * automatically when wifi_connect() or wifi_scan() is invoked.
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int nxp_wifi_deferred_init(void)
+{
+	int ret;
+
+	if (s_nxp_wifi_State == NXP_WIFI_STARTED) {
+		return 0; /* Already started */
+	}
+
+	if (s_nxp_wifi_State == NXP_WIFI_NOT_INITIALIZED) {
+		LOG_INF("Performing deferred WiFi initialization...");
+		ret = nxp_wifi_wlan_init();
+		if (ret) {
+			LOG_ERR("Deferred wlan initialization failed");
+			return ret;
+		}
+	}
+
+	if (s_nxp_wifi_State == NXP_WIFI_INITIALIZED) {
+		ret = nxp_wifi_wlan_start();
+		if (ret) {
+			LOG_ERR("Deferred wlan start failed");
+			return ret;
+		}
+	}
+
+	return 0;
+}
+#endif /* CONFIG_NXP_WIFI_DEFERRED_INIT */
 
 #ifdef CONFIG_NXP_WIFI_SOFTAP_SUPPORT
 
@@ -880,6 +922,14 @@ static int nxp_wifi_scan(const struct device *dev, struct wifi_scan_params *para
 		return -EIO;
 	}
 
+#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
+	/* Perform deferred initialization if needed */
+	ret = nxp_wifi_deferred_init();
+	if (ret) {
+		return ret;
+	}
+#endif
+
 	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
 		LOG_ERR("Wi-Fi not started status %d", s_nxp_wifi_State);
 		return -EBUSY;
@@ -992,6 +1042,15 @@ static int nxp_wifi_connect(const struct device *dev, struct wifi_connect_req_pa
 	int status = NXP_WIFI_RET_SUCCESS;
 	int ret;
 	struct interface *if_handle = (struct interface *)dev->data;
+
+#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
+	/* Perform deferred initialization if needed */
+	ret = nxp_wifi_deferred_init();
+	if (ret) {
+		wifi_mgmt_raise_connect_result_event(g_mlan.netif, -1);
+		return ret;
+	}
+#endif
 
 	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
 		LOG_ERR("Wi-Fi not started");
@@ -1246,8 +1305,9 @@ static int nxp_wifi_uap_status(const struct device *dev, struct wifi_iface_statu
 			}
 
 			if (nxp_wlan_uap_network.channel != 0) {
-				status->band = nxp_wlan_uap_network.channel > 14 ?
-					WIFI_FREQ_BAND_5_GHZ : WIFI_FREQ_BAND_2_4_GHZ;
+				status->band = nxp_wlan_uap_network.channel > 14
+						       ? WIFI_FREQ_BAND_5_GHZ
+						       : WIFI_FREQ_BAND_2_4_GHZ;
 			} else {
 				status->band = nxp_wlan_uap_network.acs_band;
 			}
@@ -1288,8 +1348,7 @@ static int nxp_wifi_status(const struct device *dev, struct wifi_iface_status *s
 		status->state = WIFI_STATE_ASSOCIATING;
 	} else if (connection_state == WLAN_ASSOCIATED) {
 		status->state = WIFI_STATE_ASSOCIATED;
-	} else if (connection_state == WLAN_AUTHENTICATED
-			|| connection_state == WLAN_CONNECTED) {
+	} else if (connection_state == WLAN_AUTHENTICATED || connection_state == WLAN_CONNECTED) {
 		status->state = WIFI_STATE_COMPLETED;
 		wlan_ds_rate ds_rate = {0};
 
@@ -1322,11 +1381,11 @@ static int nxp_wifi_status(const struct device *dev, struct wifi_iface_status *s
 #endif
 #ifdef CONFIG_NXP_WIFI_11AC
 				if (nxp_wlan_network.dot11ac) {
-					status->link_mode = WIFI_5;
+				status->link_mode = WIFI_5;
 			} else
 #endif
 				if (nxp_wlan_network.dot11n) {
-					status->link_mode = WIFI_4;
+				status->link_mode = WIFI_4;
 			} else {
 				status->link_mode = WIFI_3;
 			}
@@ -1340,8 +1399,10 @@ static int nxp_wifi_status(const struct device *dev, struct wifi_iface_status *s
 			status->security = nxp_wifi_key_mgmt_to_zephyr(
 				nxp_wlan_network.security.key_mgmt,
 				nxp_wlan_network.security.pwe_derivation);
-			status->mfp = nxp_wlan_network.security.mfpr ? WIFI_MFP_REQUIRED :
-				(nxp_wlan_network.security.mfpc ? WIFI_MFP_OPTIONAL : 0);
+			status->mfp =
+				nxp_wlan_network.security.mfpr
+					? WIFI_MFP_REQUIRED
+					: (nxp_wlan_network.security.mfpc ? WIFI_MFP_OPTIONAL : 0);
 		}
 		ds_rate.sub_command = WIFI_DS_GET_DATA_RATE;
 		if (!wlan_get_data_rate(&ds_rate, WLAN_BSS_TYPE_STA)) {
@@ -1372,8 +1433,7 @@ static int nxp_wifi_get_detail_stats(int bss_type, wlan_pkt_stats_t *stats)
 
 	if (bss_type == WLAN_BSS_TYPE_STA) {
 		ret = wlan_get_log(stats);
-	} else if (IS_ENABLED(CONFIG_NXP_WIFI_SOFTAP_SUPPORT) &&
-		   (bss_type == WLAN_BSS_TYPE_UAP)) {
+	} else if (IS_ENABLED(CONFIG_NXP_WIFI_SOFTAP_SUPPORT) && (bss_type == WLAN_BSS_TYPE_UAP)) {
 		ret = wlan_uap_get_log(stats);
 	}
 
@@ -1423,8 +1483,8 @@ static int nxp_wifi_stats(const struct device *dev, struct net_stats_wifi *stats
 	}
 
 	if (wifi_stats->bcn_rcv_cnt >= if_handle->stats.sta_mgmt.beacons_rx) {
-		stats->sta_mgmt.beacons_rx = wifi_stats->bcn_rcv_cnt -
-			if_handle->stats.sta_mgmt.beacons_rx;
+		stats->sta_mgmt.beacons_rx =
+			wifi_stats->bcn_rcv_cnt - if_handle->stats.sta_mgmt.beacons_rx;
 	} else {
 		/** we might have a new connection since last stats reset,
 		 *  so stored stats is invalid
@@ -1433,8 +1493,8 @@ static int nxp_wifi_stats(const struct device *dev, struct net_stats_wifi *stats
 	}
 
 	if (wifi_stats->bcn_miss_cnt >= if_handle->stats.sta_mgmt.beacons_miss) {
-		stats->sta_mgmt.beacons_miss = wifi_stats->bcn_miss_cnt -
-			if_handle->stats.sta_mgmt.beacons_miss;
+		stats->sta_mgmt.beacons_miss =
+			wifi_stats->bcn_miss_cnt - if_handle->stats.sta_mgmt.beacons_miss;
 	} else {
 		stats->sta_mgmt.beacons_miss = wifi_stats->bcn_miss_cnt;
 	}
@@ -1475,7 +1535,7 @@ int nxp_wifi_reset_stats(const struct device *dev)
 		return ret;
 	}
 
-	if_handle->stats.sta_mgmt.beacons_rx =  wifi_stats->bcn_rcv_cnt;
+	if_handle->stats.sta_mgmt.beacons_rx = wifi_stats->bcn_rcv_cnt;
 	if_handle->stats.sta_mgmt.beacons_miss = wifi_stats->bcn_miss_cnt;
 
 	k_free(wifi_stats);
@@ -1785,8 +1845,8 @@ static int nxp_wifi_reg_domain(const struct device *dev, struct wifi_reg_domain 
 	int nxp_wifi_cfp_no = 0;
 
 	if (reg_domain->oper == WIFI_MGMT_GET) {
-		nxp_wifi_chan_freq_power = (chan_freq_power_t *)wlan_get_regulatory_domain(0,
-				&nxp_wifi_cfp_no);
+		nxp_wifi_chan_freq_power =
+			(chan_freq_power_t *)wlan_get_regulatory_domain(0, &nxp_wifi_cfp_no);
 		if (nxp_wifi_chan_freq_power != NULL) {
 			for (int i = 0; i < nxp_wifi_cfp_no; i++) {
 				reg_domain->chan_info[i].center_frequency =
@@ -1802,8 +1862,8 @@ static int nxp_wifi_reg_domain(const struct device *dev, struct wifi_reg_domain 
 			index = nxp_wifi_cfp_no;
 		}
 
-		nxp_wifi_chan_freq_power = (chan_freq_power_t *)wlan_get_regulatory_domain(1,
-				&nxp_wifi_cfp_no);
+		nxp_wifi_chan_freq_power =
+			(chan_freq_power_t *)wlan_get_regulatory_domain(1, &nxp_wifi_cfp_no);
 		if (nxp_wifi_chan_freq_power != NULL) {
 			for (int i = 0; i < nxp_wifi_cfp_no; i++) {
 				reg_domain->chan_info[index + i].center_frequency =
@@ -1837,7 +1897,6 @@ static int nxp_wifi_reg_domain(const struct device *dev, struct wifi_reg_domain 
 			LOG_ERR("Unable to create and download countryinfo");
 			return -EAGAIN;
 		}
-
 	}
 	return 0;
 }
@@ -1891,14 +1950,13 @@ static int nxp_wifi_set_btwt(const struct device *dev, struct wifi_twt_params *p
 	btwt_config.count = params->btwt.btwt_count;
 
 	for (int i = 0; i < btwt_config.count; i++) {
-		btwt_config.btwt_sets[i].btwt_id
-			= params->btwt.btwt_set_cfg[i].btwt_id;
-		btwt_config.btwt_sets[i].bcast_mantissa
-			= params->btwt.btwt_set_cfg[i].btwt_mantissa;
-		btwt_config.btwt_sets[i].bcast_exponent
-			= params->btwt.btwt_set_cfg[i].btwt_exponent;
-		btwt_config.btwt_sets[i].nominal_wake
-			= params->btwt.btwt_set_cfg[i].btwt_nominal_wake;
+		btwt_config.btwt_sets[i].btwt_id = params->btwt.btwt_set_cfg[i].btwt_id;
+		btwt_config.btwt_sets[i].bcast_mantissa =
+			params->btwt.btwt_set_cfg[i].btwt_mantissa;
+		btwt_config.btwt_sets[i].bcast_exponent =
+			params->btwt.btwt_set_cfg[i].btwt_exponent;
+		btwt_config.btwt_sets[i].nominal_wake =
+			params->btwt.btwt_set_cfg[i].btwt_nominal_wake;
 	}
 
 	return wlan_set_btwt_cfg(&btwt_config);
@@ -1948,11 +2006,10 @@ static void nxp_wifi_sta_init(struct net_if *iface)
 	intf->netif = iface;
 #ifdef CONFIG_WIFI_NM
 #ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT
-	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_supplicant"),
-			WIFI_TYPE_STA, iface);
+	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_supplicant"), WIFI_TYPE_STA,
+					iface);
 #else
-	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_sta"),
-			WIFI_TYPE_STA, iface);
+	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_sta"), WIFI_TYPE_STA, iface);
 #endif
 #endif
 	g_mlan.state.interface = WLAN_BSS_TYPE_STA;
@@ -1961,6 +2018,15 @@ static void nxp_wifi_sta_init(struct net_if *iface)
 	int ret;
 
 	if (s_nxp_wifi_State == NXP_WIFI_NOT_INITIALIZED) {
+#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
+		/* Deferred init mode: Skip slow WLAN initialization at boot.
+		 * The initialization will happen when WiFi is first used
+		 * (e.g., connect, scan). Set NO_AUTO_START to prevent
+		 * automatic interface up.
+		 */
+		LOG_INF("WiFi deferred init enabled, skipping boot-time initialization");
+		net_if_flag_set(iface, NET_IF_NO_AUTO_START);
+#else
 		/* Initialize the wifi subsystem */
 		ret = nxp_wifi_wlan_init();
 		if (ret) {
@@ -1972,6 +2038,7 @@ static void nxp_wifi_sta_init(struct net_if *iface)
 			LOG_ERR("wlan start failed");
 			return;
 		}
+#endif /* CONFIG_NXP_WIFI_DEFERRED_INIT */
 	}
 #endif
 }
@@ -1990,11 +2057,9 @@ static void nxp_wifi_uap_init(struct net_if *iface)
 
 #ifdef CONFIG_WIFI_NM
 #ifdef CONFIG_WIFI_NM_HOSTAPD_AP
-	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("hostapd"),
-			WIFI_TYPE_SAP, iface);
+	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("hostapd"), WIFI_TYPE_SAP, iface);
 #else
-	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_sap"),
-			WIFI_TYPE_SAP, iface);
+	wifi_nm_register_mgd_type_iface(wifi_nm_get_instance("wifi_sap"), WIFI_TYPE_SAP, iface);
 #endif
 #endif
 	g_uap.state.interface = WLAN_BSS_TYPE_UAP;
@@ -2131,8 +2196,8 @@ static int nxp_wifi_dev_init(const struct device *dev)
 	/* Configure wakeup gpio as input  */
 	err = gpio_pin_configure_dt(&wakeup, GPIO_INPUT);
 	if (err) {
-		LOG_ERR("Error %d: failed to configure wakeup %s pin %d", err,
-			wakeup.port->name, wakeup.pin);
+		LOG_ERR("Error %d: failed to configure wakeup %s pin %d", err, wakeup.port->name,
+			wakeup.pin);
 		return err;
 	}
 
@@ -2341,39 +2406,39 @@ DEFINE_WIFI_NM_INSTANCE(wifi_sta, &nxp_wifi_sta_mgmt);
 #if defined(CONFIG_WIFI_NM_WPA_SUPPLICANT)
 static const struct zep_wpa_supp_dev_ops nxp_wifi_drv_ops = {
 	.init = wifi_nxp_wpa_supp_dev_init,
-	.deinit                   = wifi_nxp_wpa_supp_dev_deinit,
-	.scan2                    = wifi_nxp_wpa_supp_scan2,
-	.scan_abort               = wifi_nxp_wpa_supp_scan_abort,
-	.get_scan_results2        = wifi_nxp_wpa_supp_scan_results_get,
-	.deauthenticate           = wifi_nxp_wpa_supp_deauthenticate,
-	.authenticate             = wifi_nxp_wpa_supp_authenticate,
-	.associate                = wifi_nxp_wpa_supp_associate,
-	.set_key                  = wifi_nxp_wpa_supp_set_key,
-	.set_supp_port            = wifi_nxp_wpa_supp_set_supp_port,
-	.signal_poll              = wifi_nxp_wpa_supp_signal_poll,
-	.send_mlme                = wifi_nxp_wpa_supp_send_mlme,
-	.get_wiphy                = wifi_nxp_wpa_supp_get_wiphy,
-	.get_capa                 = wifi_nxp_wpa_supp_get_capa,
-	.get_conn_info            = wifi_nxp_wpa_supp_get_conn_info,
-	.set_country              = wifi_nxp_wpa_supp_set_country,
-	.get_country              = wifi_nxp_wpa_supp_get_country,
+	.deinit = wifi_nxp_wpa_supp_dev_deinit,
+	.scan2 = wifi_nxp_wpa_supp_scan2,
+	.scan_abort = wifi_nxp_wpa_supp_scan_abort,
+	.get_scan_results2 = wifi_nxp_wpa_supp_scan_results_get,
+	.deauthenticate = wifi_nxp_wpa_supp_deauthenticate,
+	.authenticate = wifi_nxp_wpa_supp_authenticate,
+	.associate = wifi_nxp_wpa_supp_associate,
+	.set_key = wifi_nxp_wpa_supp_set_key,
+	.set_supp_port = wifi_nxp_wpa_supp_set_supp_port,
+	.signal_poll = wifi_nxp_wpa_supp_signal_poll,
+	.send_mlme = wifi_nxp_wpa_supp_send_mlme,
+	.get_wiphy = wifi_nxp_wpa_supp_get_wiphy,
+	.get_capa = wifi_nxp_wpa_supp_get_capa,
+	.get_conn_info = wifi_nxp_wpa_supp_get_conn_info,
+	.set_country = wifi_nxp_wpa_supp_set_country,
+	.get_country = wifi_nxp_wpa_supp_get_country,
 #ifdef CONFIG_NXP_WIFI_SOFTAP_SUPPORT
 #ifdef CONFIG_WIFI_NM_HOSTAPD_AP
-	.hapd_init                = wifi_nxp_hostapd_dev_init,
-	.hapd_deinit              = wifi_nxp_hostapd_dev_deinit,
+	.hapd_init = wifi_nxp_hostapd_dev_init,
+	.hapd_deinit = wifi_nxp_hostapd_dev_deinit,
 #endif
-	.init_ap                  = wifi_nxp_wpa_supp_init_ap,
-	.set_ap                   = wifi_nxp_hostapd_set_ap,
-	.stop_ap                  = wifi_nxp_hostapd_stop_ap,
-	.sta_remove               = wifi_nxp_hostapd_sta_remove,
-	.sta_add                  = wifi_nxp_hostapd_sta_add,
-	.do_acs                   = wifi_nxp_hostapd_do_acs,
-	.get_inact_sec            = wifi_nxp_wpa_supp_sta_get_inact_sec,
+	.init_ap = wifi_nxp_wpa_supp_init_ap,
+	.set_ap = wifi_nxp_hostapd_set_ap,
+	.stop_ap = wifi_nxp_hostapd_stop_ap,
+	.sta_remove = wifi_nxp_hostapd_sta_remove,
+	.sta_add = wifi_nxp_hostapd_sta_add,
+	.do_acs = wifi_nxp_hostapd_do_acs,
+	.get_inact_sec = wifi_nxp_wpa_supp_sta_get_inact_sec,
 #endif
-	.dpp_listen               = wifi_nxp_wpa_dpp_listen,
-	.remain_on_channel        = wifi_nxp_wpa_supp_remain_on_channel,
+	.dpp_listen = wifi_nxp_wpa_dpp_listen,
+	.remain_on_channel = wifi_nxp_wpa_supp_remain_on_channel,
 	.cancel_remain_on_channel = wifi_nxp_wpa_supp_cancel_remain_on_channel,
-	.send_action_cancel_wait  = wifi_nxp_wpa_supp_cancel_action_wait,
+	.send_action_cancel_wait = wifi_nxp_wpa_supp_cancel_action_wait,
 };
 #endif
 
