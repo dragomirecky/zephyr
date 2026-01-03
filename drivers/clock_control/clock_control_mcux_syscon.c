@@ -630,6 +630,8 @@ static int mcux_lpc_syscon_clock_control_get_subsys_rate(const struct device *de
 		*rate = CLOCK_GetMicfilClkFreq();
 		break;
 #endif
+	default:
+		return -ENOTSUP;
 	}
 
 	return 0;
