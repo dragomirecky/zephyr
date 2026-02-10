@@ -2050,6 +2050,14 @@ static void nxp_wifi_deferred_init_work_handler(struct k_work *work)
 	/* Bring interface up now that hardware is ready */
 	iface = net_if_get_first_wifi();
 	if (iface) {
+		struct net_linkaddr *link_addr = net_if_get_link_addr(iface);
+
+		if (link_addr && link_addr->len >= 6) {
+			LOG_INF("WiFi STA MAC: %02X:%02X:%02X:%02X:%02X:%02X", link_addr->addr[0],
+				link_addr->addr[1], link_addr->addr[2], link_addr->addr[3],
+				link_addr->addr[4], link_addr->addr[5]);
+		}
+
 		ret = net_if_up(iface);
 		if (ret) {
 			LOG_ERR("Failed to bring WiFi interface up: %d", ret);
@@ -2057,6 +2065,19 @@ static void nxp_wifi_deferred_init_work_handler(struct k_work *work)
 			LOG_INF("WiFi interface is up");
 		}
 	}
+
+#ifdef CONFIG_NXP_RW610
+	{
+		static const char *const pkg_names[] = {"QFN", "CSP", "BGA"};
+		uint32_t board_type = wifi_get_board_type();
+
+		if (board_type < ARRAY_SIZE(pkg_names)) {
+			LOG_INF("RW612 board type: %s", pkg_names[board_type]);
+		} else {
+			LOG_WRN("RW612 board type: unknown (%u)", board_type);
+		}
+	}
+#endif
 }
 
 int nxp_wifi_deferred_init(void)
