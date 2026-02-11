@@ -37,14 +37,39 @@ config NXP_WIFI_AUTO_INIT
 	help
 	  Automatically initialize NXP Wi-Fi driver and FW.
 
-config NXP_WIFI_DEFERRED_INIT
-	bool "Defer NXP Wi-Fi hardware initialization"
-	default n
-	depends on NXP_WIFI_AUTO_INIT
+config NXP_WIFI_ASYNC_OPS
+	bool "Non-blocking WiFi operations"
+	default y
 	help
-	  When enabled, WiFi hardware initialization is deferred from
-	  net_if_init() to net_if_up(). This speeds up boot but WiFi
-	  won't work until net_if_up() is called explicitly.
+	  Execute WiFi operations (init, connect, disconnect, scan) in a
+	  background worker thread. This prevents blocking the calling
+	  thread during lengthy WiFi operations. Results are delivered
+	  via existing Zephyr net_mgmt events.
+
+if NXP_WIFI_ASYNC_OPS
+
+config NXP_WIFI_WORKER_STACK_SIZE
+	int "Worker thread stack size"
+	default 8192
+	help
+	  Stack size for the WiFi worker thread that handles async operations.
+
+config NXP_WIFI_WORKER_PRIORITY
+	int "Worker thread priority"
+	default 14
+	help
+	  Priority for the WiFi worker thread. Higher values = lower priority.
+	  Default is 14 (lowest preemptible priority) to minimize impact on
+	  other threads during WiFi initialization. WiFi init is slow but
+	  won't block other operations.
+
+config NXP_WIFI_OP_QUEUE_DEPTH
+	int "Operation queue depth"
+	default 4
+	help
+	  Maximum number of pending WiFi operations in the queue.
+
+endif # NXP_WIFI_ASYNC_OPS
 
 choice NXP_WIFI_PART
 	prompt "Select NXP Wi-Fi part"

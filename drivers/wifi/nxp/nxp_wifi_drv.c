@@ -83,6 +83,28 @@ extern bool skip_hs_handshake;
 extern void wlan_hs_hanshake_cfg(bool skip);
 #endif
 
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+#include <zephyr/drivers/wifi/nxp_wifi.h>
+
+/* Worker thread for async WiFi operations */
+static K_THREAD_STACK_DEFINE(nxp_wifi_worker_stack, CONFIG_NXP_WIFI_WORKER_STACK_SIZE);
+static struct k_thread nxp_wifi_worker_thread_data;
+static struct k_msgq nxp_wifi_op_queue;
+static char __aligned(4)
+nxp_wifi_op_queue_buffer[CONFIG_NXP_WIFI_OP_QUEUE_DEPTH * sizeof(struct nxp_wifi_op_msg)];
+static bool nxp_wifi_worker_started;
+
+/* Init completion semaphore and callback */
+static struct k_sem nxp_wifi_init_sem;
+static nxp_wifi_init_cb_t nxp_wifi_init_callback;
+static void *nxp_wifi_init_user_data;
+static int nxp_wifi_init_result;
+static bool nxp_wifi_init_in_progress;
+
+/* Forward declaration */
+static int nxp_wifi_worker_start(void);
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
+
 static int nxp_wifi_recv(struct net_if *iface, struct net_pkt *pkt);
 
 /*******************************************************************************
@@ -866,23 +888,18 @@ out:
 	return WM_SUCCESS;
 }
 
-static int nxp_wifi_scan(const struct device *dev, struct wifi_scan_params *params,
-			 scan_result_cb_t cb)
+/**
+ * @brief Internal scan implementation
+ *
+ * Scan is already callback-based, so this doesn't block significantly.
+ * We route through the worker for consistency when async ops is enabled.
+ */
+static int nxp_wifi_scan_internal(const struct device *dev, struct wifi_scan_params *params,
+				  scan_result_cb_t cb)
 {
 	int ret;
-	struct interface *if_handle = (struct interface *)dev->data;
 	wlan_scan_params_v2_t wlan_scan_params_v2 = {0};
 	uint8_t i = 0;
-
-	if (if_handle->state.interface != WLAN_BSS_TYPE_STA) {
-		LOG_ERR("Wi-Fi not in station mode");
-		return -EIO;
-	}
-
-	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
-		LOG_ERR("Wi-Fi not started status %d", s_nxp_wifi_State);
-		return -EBUSY;
-	}
 
 	if (g_mlan.scan_cb != NULL) {
 		LOG_WRN("Scan callback in progress");
@@ -966,6 +983,42 @@ do_scan:
 	return 0;
 }
 
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+/**
+ * @brief Scan implementation for worker thread
+ *
+ * Note: Scan itself is already async (uses callbacks), but we route through
+ * the worker for consistency and to ensure proper thread context.
+ */
+static int nxp_wifi_do_scan_blocking(const struct device *dev, struct wifi_scan_params *params,
+				     bool has_params, scan_result_cb_t cb)
+{
+	return nxp_wifi_scan_internal(dev, has_params ? params : NULL, cb);
+}
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
+
+static int nxp_wifi_scan(const struct device *dev, struct wifi_scan_params *params,
+			 scan_result_cb_t cb)
+{
+	struct interface *if_handle = (struct interface *)dev->data;
+
+	if (if_handle->state.interface != WLAN_BSS_TYPE_STA) {
+		LOG_ERR("Wi-Fi not in station mode");
+		return -EIO;
+	}
+
+	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
+		LOG_ERR("Wi-Fi not started status %d", s_nxp_wifi_State);
+		return -EBUSY;
+	}
+
+	/* Scan is already async (uses callbacks), so we call directly
+	 * rather than routing through the worker thread. This avoids
+	 * unnecessary complexity while still maintaining non-blocking behavior.
+	 */
+	return nxp_wifi_scan_internal(dev, params, cb);
+}
+
 static int nxp_wifi_version(const struct device *dev, struct wifi_version *params)
 {
 	int status = NXP_WIFI_RET_SUCCESS;
@@ -986,10 +1039,128 @@ static int nxp_wifi_version(const struct device *dev, struct wifi_version *param
 	return 0;
 }
 
-static int nxp_wifi_connect(const struct device *dev, struct wifi_connect_req_params *params)
+/**
+ * @brief Internal blocking connect implementation
+ *
+ * This contains the actual blocking WiFi connect logic. When async ops is
+ * enabled, this runs on the worker thread. Otherwise it's called directly.
+ */
+static int nxp_wifi_connect_internal(const struct device *dev,
+				     struct wifi_connect_req_params *params)
 {
 	int status = NXP_WIFI_RET_SUCCESS;
 	int ret;
+
+	wlan_disconnect();
+
+	wlan_remove_network(nxp_wlan_network.name);
+
+	wlan_initialize_sta_network(&nxp_wlan_network);
+
+	memcpy(nxp_wlan_network.name, NXP_WIFI_STA_NETWORK_NAME, strlen(NXP_WIFI_STA_NETWORK_NAME));
+
+	memcpy(nxp_wlan_network.ssid, params->ssid, params->ssid_length);
+
+	nxp_wlan_network.ssid_specific = 1;
+
+	if (params->channel == WIFI_CHANNEL_ANY) {
+		nxp_wlan_network.channel = 0;
+	} else {
+		nxp_wlan_network.channel = params->channel;
+	}
+
+	if (params->mfp == WIFI_MFP_REQUIRED) {
+		nxp_wlan_network.security.mfpc = true;
+		nxp_wlan_network.security.mfpr = true;
+	} else if (params->mfp == WIFI_MFP_OPTIONAL) {
+		nxp_wlan_network.security.mfpc = true;
+		nxp_wlan_network.security.mfpr = false;
+	}
+
+	if (params->security == WIFI_SECURITY_TYPE_NONE) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_NONE;
+	} else if (params->security == WIFI_SECURITY_TYPE_PSK) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA2;
+		nxp_wlan_network.security.psk_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
+	} else if (params->security == WIFI_SECURITY_TYPE_PSK_SHA256) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA2;
+		nxp_wlan_network.security.key_mgmt = WLAN_KEY_MGMT_PSK_SHA256;
+		nxp_wlan_network.security.psk_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
+	} else if (params->security == WIFI_SECURITY_TYPE_SAE) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
+		nxp_wlan_network.security.password_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.password, params->psk, params->psk_length);
+	} else if (params->security == WIFI_SECURITY_TYPE_SAE_H2E) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
+		nxp_wlan_network.security.pwe_derivation = 1;
+		nxp_wlan_network.security.password_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.password, params->psk, params->psk_length);
+	} else if (params->security == WIFI_SECURITY_TYPE_SAE_AUTO) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
+		nxp_wlan_network.security.pwe_derivation = 2;
+		nxp_wlan_network.security.password_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.password, params->psk, params->psk_length);
+	} else if (params->security == WIFI_SECURITY_TYPE_WPA_AUTO_PERSONAL) {
+		nxp_wlan_network.security.type = WLAN_SECURITY_WPA2_WPA3_SAE_MIXED;
+		nxp_wlan_network.security.psk_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
+		nxp_wlan_network.security.password_len = params->psk_length;
+		strncpy(nxp_wlan_network.security.password, params->psk, params->psk_length);
+	} else {
+		status = NXP_WIFI_RET_BAD_PARAM;
+	}
+
+	if (status != NXP_WIFI_RET_SUCCESS) {
+		LOG_ERR("Failed to connect to Wi-Fi access point");
+		wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+		return -EAGAIN;
+	}
+
+	ret = wlan_add_network(&nxp_wlan_network);
+	if (ret != WM_SUCCESS) {
+		LOG_ERR("Failed to add network");
+		wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+		return -EAGAIN;
+	}
+
+	ret = wlan_connect(nxp_wlan_network.name);
+	if (ret != WM_SUCCESS) {
+		LOG_ERR("Failed to start connection");
+		wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+		return -EAGAIN;
+	}
+
+	/* Success - result event will be raised by wlan_event_callback */
+	return 0;
+}
+
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+/**
+ * @brief Blocking connect implementation for worker thread
+ */
+static int nxp_wifi_do_connect_blocking(const struct device *dev,
+					struct nxp_wifi_connect_params *params)
+{
+	struct wifi_connect_req_params req_params = {0};
+
+	/* Convert from our copied params to wifi_connect_req_params */
+	req_params.ssid = params->ssid;
+	req_params.ssid_length = params->ssid_length;
+	req_params.psk = params->psk;
+	req_params.psk_length = params->psk_length;
+	req_params.channel = params->channel;
+	req_params.security = params->security;
+	req_params.mfp = params->mfp;
+	req_params.timeout = params->timeout;
+
+	return nxp_wifi_connect_internal(dev, &req_params);
+}
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
+
+static int nxp_wifi_connect(const struct device *dev, struct wifi_connect_req_params *params)
+{
 	struct interface *if_handle = (struct interface *)dev->data;
 
 	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
@@ -1005,110 +1176,68 @@ static int nxp_wifi_connect(const struct device *dev, struct wifi_connect_req_pa
 	}
 
 	if ((params->ssid_length == 0) || (params->ssid_length > IEEEtypes_SSID_SIZE)) {
-		status = NXP_WIFI_RET_BAD_PARAM;
+		LOG_ERR("Invalid SSID length");
+		wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+		return -EINVAL;
 	}
 
-	if (status == NXP_WIFI_RET_SUCCESS) {
-		wlan_disconnect();
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+	{
+		struct nxp_wifi_op_msg msg = {0};
+		int ret;
 
-		wlan_remove_network(nxp_wlan_network.name);
-
-		wlan_initialize_sta_network(&nxp_wlan_network);
-
-		memcpy(nxp_wlan_network.name, NXP_WIFI_STA_NETWORK_NAME,
-		       strlen(NXP_WIFI_STA_NETWORK_NAME));
-
-		memcpy(nxp_wlan_network.ssid, params->ssid, params->ssid_length);
-
-		nxp_wlan_network.ssid_specific = 1;
-
-		if (params->channel == WIFI_CHANNEL_ANY) {
-			nxp_wlan_network.channel = 0;
-		} else {
-			nxp_wlan_network.channel = params->channel;
+		/* Start worker if needed */
+		ret = nxp_wifi_worker_start();
+		if (ret) {
+			wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+			return ret;
 		}
 
-		if (params->mfp == WIFI_MFP_REQUIRED) {
-			nxp_wlan_network.security.mfpc = true;
-			nxp_wlan_network.security.mfpr = true;
-		} else if (params->mfp == WIFI_MFP_OPTIONAL) {
-			nxp_wlan_network.security.mfpc = true;
-			nxp_wlan_network.security.mfpr = false;
+		/* Copy params - caller's may be on stack */
+		msg.type = NXP_WIFI_OP_CONNECT;
+		msg.dev = dev;
+
+		/* Copy SSID */
+		size_t ssid_len = MIN(params->ssid_length, NXP_WIFI_SSID_MAX_LEN - 1);
+		memcpy(msg.connect.params.ssid, params->ssid, ssid_len);
+		msg.connect.params.ssid_length = ssid_len;
+
+		/* Copy PSK if present */
+		if (params->psk && params->psk_length > 0) {
+			size_t psk_len = MIN(params->psk_length, NXP_WIFI_PSK_MAX_LEN - 1);
+			memcpy(msg.connect.params.psk, params->psk, psk_len);
+			msg.connect.params.psk_length = psk_len;
 		}
 
-		if (params->security == WIFI_SECURITY_TYPE_NONE) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_NONE;
-		} else if (params->security == WIFI_SECURITY_TYPE_PSK) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA2;
-			nxp_wlan_network.security.psk_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
-		} else if (params->security == WIFI_SECURITY_TYPE_PSK_SHA256) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA2;
-			nxp_wlan_network.security.key_mgmt = WLAN_KEY_MGMT_PSK_SHA256;
-			nxp_wlan_network.security.psk_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
-		} else if (params->security == WIFI_SECURITY_TYPE_SAE) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
-			nxp_wlan_network.security.password_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.password, params->psk,
-				params->psk_length);
-		} else if (params->security == WIFI_SECURITY_TYPE_SAE_H2E) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
-			nxp_wlan_network.security.pwe_derivation = 1;
-			nxp_wlan_network.security.password_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.password, params->psk,
-				params->psk_length);
-		} else if (params->security == WIFI_SECURITY_TYPE_SAE_AUTO) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA3_SAE;
-			nxp_wlan_network.security.pwe_derivation = 2;
-			nxp_wlan_network.security.password_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.password, params->psk,
-				params->psk_length);
-		} else if (params->security == WIFI_SECURITY_TYPE_WPA_AUTO_PERSONAL) {
-			nxp_wlan_network.security.type = WLAN_SECURITY_WPA2_WPA3_SAE_MIXED;
-			nxp_wlan_network.security.psk_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.psk, params->psk, params->psk_length);
-			nxp_wlan_network.security.password_len = params->psk_length;
-			strncpy(nxp_wlan_network.security.password, params->psk,
-				params->psk_length);
-		} else {
-			status = NXP_WIFI_RET_BAD_PARAM;
+		msg.connect.params.channel = params->channel;
+		msg.connect.params.security = params->security;
+		msg.connect.params.mfp = params->mfp;
+		msg.connect.params.timeout = params->timeout;
+
+		/* Queue and return immediately */
+		ret = k_msgq_put(&nxp_wifi_op_queue, &msg, K_NO_WAIT);
+		if (ret) {
+			LOG_ERR("Failed to queue connect operation: %d", ret);
+			wifi_mgmt_raise_connect_result_event(g_mlan.netif, WIFI_STATUS_CONN_FAIL);
+			return -EBUSY;
 		}
-	}
 
-	if (status != NXP_WIFI_RET_SUCCESS) {
-		LOG_ERR("Failed to connect to Wi-Fi access point");
-		return -EAGAIN;
+		LOG_DBG("WiFi connect operation queued");
+		return 0;
 	}
-
-	ret = wlan_add_network(&nxp_wlan_network);
-	if (ret != WM_SUCCESS) {
-		status = NXP_WIFI_RET_FAIL;
-	}
-
-	ret = wlan_connect(nxp_wlan_network.name);
-	if (ret != WM_SUCCESS) {
-		status = NXP_WIFI_RET_FAIL;
-	}
-
-	return 0;
+#else
+	/* Synchronous mode - call blocking implementation directly */
+	return nxp_wifi_connect_internal(dev, params);
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
 }
 
-static int nxp_wifi_disconnect(const struct device *dev)
+/**
+ * @brief Internal blocking disconnect implementation
+ */
+static int nxp_wifi_disconnect_internal(const struct device *dev)
 {
-	int status = NXP_WIFI_RET_SUCCESS;
 	int ret;
-	struct interface *if_handle = (struct interface *)dev->data;
 	enum wlan_connection_state connection_state = WLAN_DISCONNECTED;
-
-	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
-		status = NXP_WIFI_RET_NOT_READY;
-	}
-
-	if (if_handle->state.interface != WLAN_BSS_TYPE_STA) {
-		LOG_ERR("Wi-Fi not in station mode");
-		return -EIO;
-	}
 
 	wlan_get_connection_state(&connection_state);
 	if (connection_state == WLAN_DISCONNECTED) {
@@ -1117,22 +1246,71 @@ static int nxp_wifi_disconnect(const struct device *dev)
 		return NXP_WIFI_RET_SUCCESS;
 	}
 
-	if (status == NXP_WIFI_RET_SUCCESS) {
-		ret = wlan_disconnect();
-		if (ret != WM_SUCCESS) {
-			status = NXP_WIFI_RET_FAIL;
-		}
-	}
-
-	if (status != NXP_WIFI_RET_SUCCESS) {
+	ret = wlan_disconnect();
+	if (ret != WM_SUCCESS) {
 		LOG_ERR("Failed to disconnect from AP");
 		wifi_mgmt_raise_disconnect_result_event(g_mlan.netif, -1);
 		return -EAGAIN;
 	}
 
-	wifi_mgmt_raise_disconnect_result_event(g_mlan.netif, 0);
-
+	/* Success - result event raised in wlan_event_callback (WLAN_REASON_USER_DISCONNECT) */
 	return 0;
+}
+
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+/**
+ * @brief Blocking disconnect implementation for worker thread
+ */
+static int nxp_wifi_do_disconnect_blocking(const struct device *dev)
+{
+	return nxp_wifi_disconnect_internal(dev);
+}
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
+
+static int nxp_wifi_disconnect(const struct device *dev)
+{
+	struct interface *if_handle = (struct interface *)dev->data;
+
+	if (s_nxp_wifi_State != NXP_WIFI_STARTED) {
+		LOG_ERR("Wi-Fi not started");
+		return -EAGAIN;
+	}
+
+	if (if_handle->state.interface != WLAN_BSS_TYPE_STA) {
+		LOG_ERR("Wi-Fi not in station mode");
+		return -EIO;
+	}
+
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+	{
+		struct nxp_wifi_op_msg msg = {0};
+		int ret;
+
+		/* Start worker if needed */
+		ret = nxp_wifi_worker_start();
+		if (ret) {
+			wifi_mgmt_raise_disconnect_result_event(g_mlan.netif, -1);
+			return ret;
+		}
+
+		msg.type = NXP_WIFI_OP_DISCONNECT;
+		msg.dev = dev;
+
+		/* Queue and return immediately */
+		ret = k_msgq_put(&nxp_wifi_op_queue, &msg, K_NO_WAIT);
+		if (ret) {
+			LOG_ERR("Failed to queue disconnect operation: %d", ret);
+			wifi_mgmt_raise_disconnect_result_event(g_mlan.netif, -1);
+			return -EBUSY;
+		}
+
+		LOG_DBG("WiFi disconnect operation queued");
+		return 0;
+	}
+#else
+	/* Synchronous mode - call blocking implementation directly */
+	return nxp_wifi_disconnect_internal(dev);
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
 }
 
 #ifdef CONFIG_NXP_WIFI_SOFTAP_SUPPORT
@@ -1954,17 +2132,19 @@ static void nxp_wifi_sta_init(struct net_if *iface)
 #endif
 	g_mlan.state.interface = WLAN_BSS_TYPE_STA;
 
-#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
-	/* Prevent automatic net_if_up() call in net_if_post_init() */
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+	/* With async ops, prevent automatic net_if_up().
+	 * The application should call nxp_wifi_init_async() when ready,
+	 * similar to how deferred init worked. This allows the app to
+	 * complete other initialization first before WiFi blocks.
+	 */
 	net_if_flag_set(iface, NET_IF_NO_AUTO_START);
-#endif
-
+#else /* !CONFIG_NXP_WIFI_ASYNC_OPS */
 #ifndef CONFIG_NXP_WIFI_SOFTAP_SUPPORT
-#ifndef CONFIG_NXP_WIFI_DEFERRED_INIT
 	int ret;
 
 	if (s_nxp_wifi_State == NXP_WIFI_NOT_INITIALIZED) {
-		/* Initialize the wifi subsystem */
+		/* Initialize the wifi subsystem (blocking) */
 		ret = nxp_wifi_wlan_init();
 		if (ret) {
 			LOG_ERR("wlan initialization failed");
@@ -1976,8 +2156,8 @@ static void nxp_wifi_sta_init(struct net_if *iface)
 			return;
 		}
 	}
-#endif /* !CONFIG_NXP_WIFI_DEFERRED_INIT */
 #endif /* !CONFIG_NXP_WIFI_SOFTAP_SUPPORT */
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
 }
 
 #ifdef CONFIG_NXP_WIFI_SOFTAP_SUPPORT
@@ -1987,7 +2167,6 @@ static void nxp_wifi_uap_init(struct net_if *iface)
 	const struct device *dev = net_if_get_device(iface);
 	struct ethernet_context *eth_ctx = net_if_l2_data(iface);
 	struct interface *intf = dev->data;
-	int ret;
 
 	eth_ctx->eth_if_type = L2_ETH_IF_TYPE_WIFI;
 	intf->netif = iface;
@@ -2001,8 +2180,15 @@ static void nxp_wifi_uap_init(struct net_if *iface)
 #endif
 	g_uap.state.interface = WLAN_BSS_TYPE_UAP;
 
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
+	/* With async ops, init is triggered by app calling nxp_wifi_init_async().
+	 * Don't do blocking init here - the app controls when WiFi starts.
+	 */
+#else
 	if (s_nxp_wifi_State == NXP_WIFI_NOT_INITIALIZED) {
-		/* Initialize the wifi subsystem */
+		int ret;
+
+		/* Initialize the wifi subsystem (blocking) */
 		ret = nxp_wifi_wlan_init();
 		if (ret) {
 			LOG_ERR("wlan initialization failed");
@@ -2014,38 +2200,36 @@ static void nxp_wifi_uap_init(struct net_if *iface)
 			return;
 		}
 	}
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
 }
 
 #endif
 
-#ifdef CONFIG_NXP_WIFI_DEFERRED_INIT
-#define NXP_WIFI_INIT_WQ_STACK_SIZE 8192
-#define NXP_WIFI_INIT_WQ_PRIORITY   14 /* Low priority to not block other threads */
+#ifdef CONFIG_NXP_WIFI_ASYNC_OPS
 
-static K_THREAD_STACK_DEFINE(nxp_wifi_init_wq_stack, NXP_WIFI_INIT_WQ_STACK_SIZE);
-static struct k_work_q nxp_wifi_init_wq;
-static struct k_work nxp_wifi_init_work;
-static bool nxp_wifi_init_wq_started;
-
-static void nxp_wifi_deferred_init_work_handler(struct k_work *work)
+/**
+ * @brief Handle WiFi init operation on worker thread
+ */
+static void nxp_wifi_do_init_blocking(void)
 {
 	int ret;
 	struct net_if *iface;
 
-	ARG_UNUSED(work);
-
-	LOG_INF("Deferred WiFi init starting (workqueue)...");
+	LOG_INF("Async WiFi init starting...");
 	ret = nxp_wifi_wlan_init();
 	if (ret) {
-		LOG_ERR("Deferred wlan init failed");
-		return;
+		LOG_ERR("Async wlan init failed");
+		nxp_wifi_init_result = ret;
+		goto done;
 	}
 	ret = nxp_wifi_wlan_start();
 	if (ret) {
-		LOG_ERR("Deferred wlan start failed");
-		return;
+		LOG_ERR("Async wlan start failed");
+		nxp_wifi_init_result = ret;
+		goto done;
 	}
-	LOG_INF("Deferred WiFi init complete");
+	LOG_INF("Async WiFi init complete");
+	nxp_wifi_init_result = 0;
 
 	/* Bring interface up now that hardware is ready */
 	iface = net_if_get_first_wifi();
@@ -2078,32 +2262,179 @@ static void nxp_wifi_deferred_init_work_handler(struct k_work *work)
 		}
 	}
 #endif
+
+done:
+	nxp_wifi_init_in_progress = false;
+
+	/* Invoke user callback if registered */
+	if (nxp_wifi_init_callback) {
+		nxp_wifi_init_callback(nxp_wifi_init_result, nxp_wifi_init_user_data);
+		nxp_wifi_init_callback = NULL;
+		nxp_wifi_init_user_data = NULL;
+	}
+
+	/* Signal completion to any waiting threads */
+	k_sem_give(&nxp_wifi_init_sem);
 }
 
-int nxp_wifi_deferred_init(void)
+/**
+ * @brief Worker thread entry point
+ *
+ * Processes WiFi operations from the message queue, running blocking
+ * NXP middleware calls without blocking application threads.
+ */
+static void nxp_wifi_worker_thread_entry(void *p1, void *p2, void *p3)
 {
-	if (s_nxp_wifi_State != NXP_WIFI_NOT_INITIALIZED) {
-		LOG_INF("WiFi already initialized");
+	struct nxp_wifi_op_msg msg;
+
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	LOG_DBG("WiFi worker thread started");
+
+	while (1) {
+		/* Block waiting for an operation */
+		if (k_msgq_get(&nxp_wifi_op_queue, &msg, K_FOREVER) != 0) {
+			continue;
+		}
+
+		LOG_DBG("WiFi worker processing op type %d", msg.type);
+
+		switch (msg.type) {
+		case NXP_WIFI_OP_INIT:
+			nxp_wifi_do_init_blocking();
+			break;
+
+		case NXP_WIFI_OP_CONNECT:
+			nxp_wifi_do_connect_blocking(msg.dev, &msg.connect.params);
+			break;
+
+		case NXP_WIFI_OP_DISCONNECT:
+			nxp_wifi_do_disconnect_blocking(msg.dev);
+			break;
+
+		case NXP_WIFI_OP_SCAN:
+			nxp_wifi_do_scan_blocking(msg.dev,
+						  msg.scan.has_params ? &msg.scan.params : NULL,
+						  msg.scan.has_params, msg.scan.cb);
+			break;
+
+		default:
+			LOG_WRN("Unknown WiFi operation type: %d", msg.type);
+			break;
+		}
+	}
+}
+
+/**
+ * @brief Start the WiFi worker thread if not already running
+ */
+static int nxp_wifi_worker_start(void)
+{
+	if (nxp_wifi_worker_started) {
 		return 0;
 	}
 
-	if (!nxp_wifi_init_wq_started) {
-		struct k_work_queue_config cfg = {
-			.name = "wifi_init",
-		};
-		k_work_queue_start(&nxp_wifi_init_wq, nxp_wifi_init_wq_stack,
-				   K_THREAD_STACK_SIZEOF(nxp_wifi_init_wq_stack),
-				   NXP_WIFI_INIT_WQ_PRIORITY, &cfg);
-		k_work_init(&nxp_wifi_init_work, nxp_wifi_deferred_init_work_handler);
-		nxp_wifi_init_wq_started = true;
-	}
+	/* Initialize message queue */
+	k_msgq_init(&nxp_wifi_op_queue, nxp_wifi_op_queue_buffer, sizeof(struct nxp_wifi_op_msg),
+		    CONFIG_NXP_WIFI_OP_QUEUE_DEPTH);
 
-	LOG_INF("Scheduling deferred WiFi init...");
-	k_work_submit_to_queue(&nxp_wifi_init_wq, &nxp_wifi_init_work);
+	/* Initialize init semaphore */
+	k_sem_init(&nxp_wifi_init_sem, 0, 1);
+
+	/* Create worker thread */
+	k_thread_create(&nxp_wifi_worker_thread_data, nxp_wifi_worker_stack,
+			K_THREAD_STACK_SIZEOF(nxp_wifi_worker_stack), nxp_wifi_worker_thread_entry,
+			NULL, NULL, NULL, CONFIG_NXP_WIFI_WORKER_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&nxp_wifi_worker_thread_data, "wifi_worker");
+
+	nxp_wifi_worker_started = true;
+	LOG_DBG("WiFi worker thread created");
 
 	return 0;
 }
-#endif /* CONFIG_NXP_WIFI_DEFERRED_INIT */
+
+int nxp_wifi_init_async(nxp_wifi_init_cb_t cb, void *user_data)
+{
+	struct nxp_wifi_op_msg msg = {0};
+	int ret;
+
+	if (s_nxp_wifi_State != NXP_WIFI_NOT_INITIALIZED) {
+		LOG_DBG("WiFi already initialized");
+		if (cb) {
+			cb(0, user_data);
+		}
+		return 0;
+	}
+
+	if (nxp_wifi_init_in_progress) {
+		LOG_DBG("WiFi init already in progress");
+		return -EALREADY;
+	}
+
+	/* Start worker thread if needed */
+	ret = nxp_wifi_worker_start();
+	if (ret) {
+		return ret;
+	}
+
+	/* Store callback for later invocation */
+	nxp_wifi_init_callback = cb;
+	nxp_wifi_init_user_data = user_data;
+	nxp_wifi_init_in_progress = true;
+	nxp_wifi_init_result = -EINPROGRESS;
+
+	/* Reset the init semaphore */
+	k_sem_reset(&nxp_wifi_init_sem);
+
+	/* Queue the init operation */
+	msg.type = NXP_WIFI_OP_INIT;
+	ret = k_msgq_put(&nxp_wifi_op_queue, &msg, K_NO_WAIT);
+	if (ret) {
+		nxp_wifi_init_in_progress = false;
+		nxp_wifi_init_callback = NULL;
+		nxp_wifi_init_user_data = NULL;
+		LOG_ERR("Failed to queue WiFi init: %d", ret);
+		return -EBUSY;
+	}
+
+	LOG_INF("WiFi async init queued");
+	return 0;
+}
+
+int nxp_wifi_init_wait(k_timeout_t timeout)
+{
+	int ret;
+
+	/* Already initialized? */
+	if (s_nxp_wifi_State == NXP_WIFI_STARTED) {
+		return 0;
+	}
+
+	/* Not in progress and not initialized? */
+	if (!nxp_wifi_init_in_progress && s_nxp_wifi_State == NXP_WIFI_NOT_INITIALIZED) {
+		return -EAGAIN;
+	}
+
+	/* Wait for completion */
+	ret = k_sem_take(&nxp_wifi_init_sem, timeout);
+	if (ret == -EAGAIN) {
+		return -ETIMEDOUT;
+	}
+
+	/* Re-give the semaphore so other waiters can also see completion */
+	k_sem_give(&nxp_wifi_init_sem);
+
+	return nxp_wifi_init_result;
+}
+
+bool nxp_wifi_is_ready(void)
+{
+	return (s_nxp_wifi_State == NXP_WIFI_STARTED);
+}
+
+#endif /* CONFIG_NXP_WIFI_ASYNC_OPS */
 
 static NXP_WIFI_SET_FUNC_ATTR int nxp_wifi_send(const struct device *dev, struct net_pkt *pkt)
 {
