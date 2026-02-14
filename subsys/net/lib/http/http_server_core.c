@@ -276,6 +276,12 @@ static int accept_new_client(int server_fd)
 		return new_socket;
 	}
 
+	/* Disable Nagle's algorithm for low-latency responses */
+	int optval = 1;
+
+	(void)zsock_setsockopt(new_socket, IPPROTO_TCP, TCP_NODELAY,
+			       &optval, sizeof(optval));
+
 	const char * const addrstr =
 		net_sprint_addr(sa.ss_family, &net_sin((struct sockaddr *)&sa)->sin_addr);
 	LOG_DBG("New client from %s:%d", addrstr != NULL ? addrstr : "<unknown>",
