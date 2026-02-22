@@ -183,6 +183,19 @@ int img_mgmt_client_state_write(struct img_mgmt_client *client, char *hash, bool
 int img_mgmt_client_state_read(struct img_mgmt_client *client, struct mcumgr_image_state *res_buf);
 
 /**
+ * @brief Read image state with explicit timeout.
+ *
+ * @param client	IMG mgmt client object
+ * @param res_buf	Pointer for command response structure.
+ * @param timeout_sec	SMP command lifetime in seconds (max 30). 0 uses default.
+ *
+ * @return 0 on success.
+ * @return @ref mcumgr_err_t code on failure.
+ */
+int img_mgmt_client_state_read_with_timeout(struct img_mgmt_client *client,
+					    struct mcumgr_image_state *res_buf, int timeout_sec);
+
+/**
  * @brief Erase selected Image Slot
  *
  * @param client	IMG mgmt client object

@@ -515,7 +515,8 @@ end:
 	return rc;
 }
 
-int img_mgmt_client_state_read(struct img_mgmt_client *client, struct mcumgr_image_state *res_buf)
+static int img_mgmt_client_state_read_internal(struct img_mgmt_client *client,
+					       struct mcumgr_image_state *res_buf, int timeout_sec)
 {
 	struct net_buf *nb;
 	int rc;
@@ -548,7 +549,7 @@ int img_mgmt_client_state_read(struct img_mgmt_client *client, struct mcumgr_ima
 	nb->len = zse->payload - nb->data;
 	k_sem_reset(&mcumgr_img_client_grp_sem);
 	rc = smp_client_send_cmd(active_client->smp_client, nb, image_state_res_fn,
-				 &mcumgr_img_client_grp_sem, CONFIG_SMP_CMD_DEFAULT_LIFE_TIME);
+				 &mcumgr_img_client_grp_sem, timeout_sec);
 	if (rc) {
 		smp_packet_free(nb);
 		res_buf->status = rc;
@@ -561,6 +562,18 @@ end:
 	active_client = NULL;
 	k_mutex_unlock(&mcumgr_img_client_grp_mutex);
 	return rc;
+}
+
+int img_mgmt_client_state_read(struct img_mgmt_client *client, struct mcumgr_image_state *res_buf)
+{
+	return img_mgmt_client_state_read_internal(client, res_buf,
+						   CONFIG_SMP_CMD_DEFAULT_LIFE_TIME);
+}
+
+int img_mgmt_client_state_read_with_timeout(struct img_mgmt_client *client,
+					    struct mcumgr_image_state *res_buf, int timeout_sec)
+{
+	return img_mgmt_client_state_read_internal(client, res_buf, timeout_sec);
 }
 
 int img_mgmt_client_erase(struct img_mgmt_client *client, uint32_t slot)
