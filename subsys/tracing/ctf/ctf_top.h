@@ -549,7 +549,9 @@ static inline void ctf_top_thread_sched_suspend(uint32_t thread_id, ctf_bounded_
 
 static inline void ctf_top_isr_enter(void)
 {
-	CTF_EVENT(CTF_LITERAL(uint8_t, CTF_EVENT_ISR_ENTER));
+	uint32_t irq = __get_IPSR() - 16;
+
+	CTF_EVENT(CTF_LITERAL(uint8_t, CTF_EVENT_ISR_ENTER), irq);
 }
 
 static inline void ctf_top_isr_exit(void)

@@ -144,6 +144,9 @@ event {
 event {
 	name = isr_enter;
 	id = 0x1B;
+	fields := struct {
+		uint32_t irq;
+	};
 };
 
 event {
