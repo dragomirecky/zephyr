@@ -2236,6 +2236,26 @@ static void nxp_wifi_do_init_blocking(void)
 	if (iface) {
 		struct net_linkaddr *link_addr = net_if_get_link_addr(iface);
 
+		/* net_wlan_init (called from wlcmgr_task) should have set the
+		 * link address by now.  If it is still all-zeros, read it from
+		 * the WLAN stack and set it here so that the net_if has the
+		 * correct MAC before we bring the interface up.
+		 */
+		if (link_addr &&
+		    (link_addr->len == 0 ||
+		     (link_addr->addr[0] == 0 && link_addr->addr[1] == 0 &&
+		      link_addr->addr[2] == 0 && link_addr->addr[3] == 0 &&
+		      link_addr->addr[4] == 0 && link_addr->addr[5] == 0))) {
+			unsigned char sta_mac[6];
+
+			if (wlan_get_mac_address(sta_mac) == 0) {
+				net_if_set_link_addr(iface, sta_mac,
+						     sizeof(sta_mac),
+						     NET_LINK_ETHERNET);
+				link_addr = net_if_get_link_addr(iface);
+			}
+		}
+
 		if (link_addr && link_addr->len >= 6) {
 			LOG_INF("WiFi STA MAC: %02X:%02X:%02X:%02X:%02X:%02X", link_addr->addr[0],
 				link_addr->addr[1], link_addr->addr[2], link_addr->addr[3],
