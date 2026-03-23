@@ -55,3 +55,16 @@ endif()
 add_subdirectory(${MCUX_SDK_NG_DIR}/middleware/usb
   ${CMAKE_CURRENT_BINARY_DIR}/usb
 )
+
+# NXP Connectivity Framework — BLE platform support for RW61x
+if(CONFIG_BT_NXP AND CONFIG_SOC_SERIES_RW6XX)
+  set(CONFIG_MCUX_COMPONENT_middleware.wireless.framework.platform.rw61x ON)
+  set(CONFIG_MCUX_COMPONENT_middleware.wireless.framework.platform.ble ON)
+  set(CONFIG_MCUX_COMPONENT_middleware.wireless.framework.platform.coex ON)
+endif()
+
+if(EXISTS ${MCUX_SDK_NG_DIR}/middleware/mcuxsdk-middleware-connectivity-framework)
+  add_subdirectory(${MCUX_SDK_NG_DIR}/middleware/mcuxsdk-middleware-connectivity-framework
+    ${CMAKE_CURRENT_BINARY_DIR}/connectivity-framework
+  )
+endif()
