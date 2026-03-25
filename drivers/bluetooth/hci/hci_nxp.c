@@ -30,6 +30,7 @@
 
 struct bt_nxp_data {
 	bt_hci_recv_t recv;
+	bool draining_vs_events;
 };
 
 struct hci_data {
@@ -340,11 +341,43 @@ static struct net_buf *bt_acl_recv(uint8_t *data, size_t len)
 	return buf;
 }
 
+/* Check if an HCI event is a vendor-specific command complete that the NXP
+ * platform framework sent during PLATFORM_StartHci().  These arrive before
+ * the BT core issues HCI Reset and would cause spurious "OpCode completed
+ * instead of expected" errors if forwarded. */
+static bool is_nxp_unsolicited_vs_complete(const uint8_t *data, uint16_t len)
+{
+	/* Command Complete event: evt=0x0e, param[0]=ncmd, param[1..2]=opcode */
+	if (len >= 5 && data[0] == BT_HCI_EVT_CMD_COMPLETE) {
+		uint16_t opcode = (uint16_t)data[3] | ((uint16_t)data[4] << 8);
+		uint8_t ogf = BT_OGF(opcode);
+
+		/* Vendor-specific OGF = 0x3F */
+		if (ogf == BT_OGF_VS) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void process_rx(uint8_t packetType, uint8_t *data, uint16_t len)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(0));
 	struct bt_nxp_data *hci = dev->data;
 	struct net_buf *buf;
+
+	/* Silently drop vendor-specific command completions that the NXP
+	 * platform framework sends during PLATFORM_StartHci() (cal data,
+	 * sleep config, low power).  These are not expected by the BT core
+	 * and would cause opcode mismatch errors.  The filter stays active
+	 * for the lifetime of the driver — the framework owns VS commands,
+	 * and the Zephyr setup path uses CONFIG_HCI_NXP_SET_CAL_DATA /
+	 * CONFIG_HCI_NXP_ENABLE_AUTO_SLEEP which are disabled when the
+	 * framework handles them. */
+	if (hci->draining_vs_events && packetType == BT_HCI_H4_EVT &&
+	    is_nxp_unsolicited_vs_complete(data, len)) {
+		return;
+	}
 
 	switch (packetType) {
 	case BT_HCI_H4_EVT:
@@ -467,10 +500,16 @@ static int bt_nxp_open(const struct device *dev, bt_hci_recv_t recv)
 		 * them through hci->recv. */
 		hci->recv = recv;
 
+		/* PLATFORM_StartHci sends vendor-specific commands (cal data,
+		 * sleep config) whose completions would confuse the BT core.
+		 * Drain them silently until setup() is called. */
+		hci->draining_vs_events = true;
+
 		ret = PLATFORM_StartHci();
 		if (ret < 0) {
 			LOG_ERR("HCI open failed");
 			hci->recv = NULL;
+			hci->draining_vs_events = false;
 			break;
 		}
 	} while (false);
@@ -480,8 +519,6 @@ static int bt_nxp_open(const struct device *dev, bt_hci_recv_t recv)
 
 int bt_nxp_setup(const struct device *dev, const struct bt_hci_setup_params *params)
 {
-	ARG_UNUSED(dev);
-
 	int ret = 0;
 
 	do {
