@@ -462,13 +462,17 @@ static int bt_nxp_open(const struct device *dev, bt_hci_recv_t recv)
 			break;
 		}
 
+		/* Set recv before StartHci — the controller can send HCI
+		 * events as soon as the link is up and hci_rx_cb delivers
+		 * them through hci->recv. */
+		hci->recv = recv;
+
 		ret = PLATFORM_StartHci();
 		if (ret < 0) {
 			LOG_ERR("HCI open failed");
+			hci->recv = NULL;
 			break;
 		}
-
-		hci->recv = recv;
 	} while (false);
 
 	return ret;
