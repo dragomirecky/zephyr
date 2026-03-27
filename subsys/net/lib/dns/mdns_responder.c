@@ -163,16 +163,18 @@ static void mdns_iface_event_handler(struct net_mgmt_event_callback *cb,
 {
 	if (mgmt_event == NET_EVENT_IF_UP) {
 #if defined(CONFIG_NET_IPV4)
-		ARRAY_FOR_EACH(v4_ctx, i) {
-			int ret = net_ipv4_igmp_join(iface,
-					&net_sin(&v4_ctx[i].dispatcher.local_addr)->sin_addr,
-					NULL);
-			if (ret < 0 && ret != -EALREADY) {
-				NET_DBG("Cannot add IPv4 multicast address %s to iface %d (%d)",
-					net_sprint_ipv4_addr(&net_sin(
-						&v4_ctx[i].dispatcher.local_addr)->sin_addr),
-					net_if_get_by_iface(iface), ret);
-			}
+		/* Join mDNS multicast group on the newly-up interface.
+		 * Use the well-known mDNS IPv4 multicast address directly
+		 * (local_addr is bound to INADDR_ANY for socket binding).
+		 */
+		struct in_addr mdns_mcast;
+
+		mdns_mcast.s_addr = htonl(0xE00000FB); /* 224.0.0.251 */
+
+		int ret = net_ipv4_igmp_join(iface, &mdns_mcast, NULL);
+		if (ret < 0 && ret != -EALREADY) {
+			NET_DBG("Cannot add IPv4 mDNS multicast to iface %d (%d)",
+				net_if_get_by_iface(iface), ret);
 		}
 #endif /* defined(CONFIG_NET_IPV4) */
 	}
@@ -1136,7 +1138,14 @@ static void setup_ipv6_addr(struct sockaddr_in6 *local_addr)
 {
 	create_ipv6_addr(local_addr);
 
+	/* Join multicast group on all interfaces using the mcast address */
 	net_if_foreach(iface_ipv6_cb, &local_addr->sin6_addr);
+
+	/* Bind socket to any address — multicast group membership handles
+	 * reception filtering.  Binding directly to the multicast address
+	 * breaks on virtual network interfaces (e.g. Renode TAP bridge).
+	 */
+	memset(&local_addr->sin6_addr, 0, sizeof(local_addr->sin6_addr));
 }
 #endif /* CONFIG_NET_IPV6 */
 
@@ -1172,7 +1181,14 @@ static void setup_ipv4_addr(struct sockaddr_in *local_addr)
 {
 	create_ipv4_addr(local_addr);
 
+	/* Join multicast group on all interfaces using the mcast address */
 	net_if_foreach(iface_ipv4_cb, &local_addr->sin_addr);
+
+	/* Bind socket to INADDR_ANY — multicast group membership handles
+	 * reception filtering.  Binding directly to the multicast address
+	 * breaks on virtual network interfaces (e.g. Renode TAP bridge).
+	 */
+	local_addr->sin_addr.s_addr = htonl(INADDR_ANY);
 }
 #endif /* CONFIG_NET_IPV4 */
 
